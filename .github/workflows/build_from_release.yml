@@ -1,93 +1,24 @@
-
-name: Build PAyler from Release
-
-on:
-  workflow_dispatch:
-    inputs:
-      release_tag:
-        description: "GitHub Release tag to build"
-        required: true
-        default: "v0.1_Test"
-
-permissions:
-  contents: read
-
-jobs:
-  build:
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Setup Java 21
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: 21
-
-      - name: Download release ZIP
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ inputs.release_tag }}
-        run: |
-          gh api "repos/obsyproject/PAyler/releases/tags/$RELEASE_TAG" > release.json
-
-          ZIP_URL=$(jq -r '[.assets[] | select(.name | endswith(".zip"))][0].browser_download_url' release.json)
-
-          if [ -z "$ZIP_URL" ] || [ "$ZIP_URL" = "null" ]; then
-            echo "No ZIP asset found in release $RELEASE_TAG"
-            exit 1
-          fi
-
-          echo "Downloading: $ZIP_URL"
-          curl -L --fail "$ZIP_URL" -o source.zip
-
-      - name: Extract release ZIP
-        run: |
-          mkdir extracted
-          unzip -q source.zip -d extracted
-
-          if [ ! -f "extracted/PAyler/settings.gradle.kts" ]; then
-            echo "Could not find PAyler project inside ZIP"
-            find extracted -maxdepth 3 -name settings.gradle.kts
-            exit 1
-          fi
-
-      - name: Checkout matching source with submodules
-        env:
-          RELEASE_TAG: ${{ inputs.release_tag }}
-        run: |
-          git clone \
-            --depth 1 \
-            --branch "$RELEASE_TAG" \
-            --recurse-submodules \
-            https://github.com/obsyproject/PAyler.git \
-            submodule-source
-
       - name: Restore submodule contents
         run: |
+          PROJECT_DIR=$(dirname "$(find submodule-source -name settings.gradle.kts -print -quit)")
+
+          if [ -z "$PROJECT_DIR" ] || [ "$PROJECT_DIR" = "." ]; then
+            echo "Could not locate the cloned PAyler project"
+            find submodule-source -maxdepth 4 -type f -name settings.gradle.kts
+            exit 1
+          fi
+
+          echo "Found project at: $PROJECT_DIR"
+
+          git -C submodule-source submodule update --init --recursive
+
           for module in taglib ffMetadataEx innertubex; do
-            if [ ! -d "submodule-source/$module" ]; then
-              echo "Missing submodule: $module"
+            if [ ! -d "$PROJECT_DIR/$module" ]; then
+              echo "Missing submodule: $PROJECT_DIR/$module"
+              find submodule-source -maxdepth 4 -type d
               exit 1
             fi
 
             rm -rf "extracted/PAyler/$module"
-            cp -a "submodule-source/$module" "extracted/PAyler/$module"
+            cp -a "$PROJECT_DIR/$module" "extracted/PAyler/$module"
           done
-
-      - name: Accept Android SDK licenses
-        run: |
-          yes | /usr/local/lib/android/sdk/cmdline-tools/latest/bin/sdkmanager --licenses || true
-
-      - name: Build APK
-        working-directory: extracted/PAyler
-        run: |
-          chmod +x gradlew
-          ./gradlew assembleCoreDebug --stacktrace -DskipFormatKtlint
-
-      - name: Upload APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: PAyler-debug
-          path: extracted/PAyler/app/build/outputs/apk/core/debug/*.apk
-          if-no-files-found: error
-          retention-days: 30
